@@ -1,0 +1,6 @@
+{
+  "name": "SentinelOps — Institutional Node & Fleet Safety Console",
+  "description": "High-density institutional network surveillance, real-time node telemetry, socket control, and fleet safety operations console.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
