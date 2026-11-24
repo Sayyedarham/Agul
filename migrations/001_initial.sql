@@ -1,0 +1,4 @@
+CREATE TABLE IF NOT EXISTS devices (id uuid PRIMARY KEY, hostname text NOT NULL, ip inet, mac macaddr, os text, approved boolean NOT NULL DEFAULT false, enrollment_token_hash text, last_heartbeat timestamptz, created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS telemetry (id bigserial PRIMARY KEY, device_id uuid REFERENCES devices(id), cpu numeric, ram numeric, disk numeric, uptime_seconds bigint, collected_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS discoveries (id bigserial PRIMARY KEY, ip inet NOT NULL, mac macaddr, hostname text, scanned_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS alerts (id bigserial PRIMARY KEY, device_id uuid REFERENCES devices(id), severity text NOT NULL, kind text NOT NULL, message text NOT NULL, acknowledged_at timestamptz, created_at timestamptz NOT NULL DEFAULT now());

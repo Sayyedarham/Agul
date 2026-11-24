@@ -3,6 +3,9 @@ import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fleetEngine } from './server/fleetStore.ts';
+import { familyEngine } from './server/familyStore.ts';
+import { validatePolicy, transitionPolicy } from './server/policyEngine.ts';
+import { agentAdapter } from './server/agentAdapter.ts';
 
 dotenv.config();
 
@@ -31,9 +34,15 @@ async function bootstrap() {
       res.write(`data: ${JSON.stringify(payload)}\n\n`);
     };
 
+    const onFamilyTick = (familyState: unknown) => {
+      res.write(`data: ${JSON.stringify({ type: 'family-tick', family: familyState })}\n\n`);
+    };
+
     fleetEngine.on('tick', onTick);
+    familyEngine.on('family-tick', onFamilyTick);
     req.on('close', () => {
       fleetEngine.off('tick', onTick);
+      familyEngine.off('family-tick', onFamilyTick);
     });
   });
 
@@ -121,6 +130,154 @@ async function bootstrap() {
     );
     res.send(csv);
   });
+
+  // -------------------------------------------------------------------------
+  // Family API routes
+  // -------------------------------------------------------------------------
+
+  // --- Devices ---
+
+  app.get('/api/family/devices', (_req, res) => {
+    res.json(familyEngine.getState().devices);
+  });
+
+  app.get('/api/family/devices/:id', (req, res) => {
+    const device = familyEngine.getDevice(req.params.id);
+    if (!device) {
+      res.status(404).json({ error: 'Device not found.' });
+      return;
+    }
+    res.json(device);
+  });
+
+  app.delete('/api/family/devices/:id', (req, res) => {
+    const revoked = familyEngine.revokeDevice(req.params.id);
+    if (!revoked) {
+      res.status(404).json({ error: 'Device not found.' });
+      return;
+    }
+    res.json({ revoked: true, state: familyEngine.getState() });
+  });
+
+  app.get('/api/family/devices/:id/health', (req, res) => {
+    const health = familyEngine.getLatestHealth(req.params.id);
+    if (!health) {
+      res.status(404).json({ error: 'No health data for this device.' });
+      return;
+    }
+    res.json(health);
+  });
+
+  app.get('/api/family/devices/:id/history', (req, res) => {
+    const history = familyEngine.getHistory(req.params.id);
+    res.json(history);
+  });
+
+  // --- Alerts ---
+
+  app.get('/api/family/alerts', (_req, res) => {
+    res.json(familyEngine.getState().alerts);
+  });
+
+  app.post('/api/family/alerts/:id/resolve', (req, res) => {
+    const resolved = familyEngine.resolveAlert(req.params.id);
+    if (!resolved) {
+      res.status(404).json({ error: 'Alert not found.' });
+      return;
+    }
+    res.json(resolved);
+  });
+
+  // --- Policies ---
+
+  app.get('/api/family/policies/:deviceId', (req, res) => {
+    const policy = familyEngine.getState().policies.find(
+      (p) => p.deviceId === req.params.deviceId
+    );
+    if (!policy) {
+      res.status(404).json({ error: 'No policy for this device.' });
+      return;
+    }
+    res.json(policy);
+  });
+
+  app.put('/api/family/policies/:deviceId', (req, res) => {
+    const errors = validatePolicy(req.body ?? {});
+    if (errors.length > 0) {
+      res.status(400).json({ errors });
+      return;
+    }
+
+    const existing = familyEngine.getState().policies.find(
+      (p) => p.deviceId === req.params.deviceId
+    );
+    if (!existing) {
+      res.status(404).json({ error: 'No policy for this device.' });
+      return;
+    }
+
+    const merged = { ...existing, ...req.body, deviceId: req.params.deviceId };
+    const pending = transitionPolicy(merged, 'apply');
+    const updated = familyEngine.updatePolicy(req.params.deviceId, pending);
+    res.json(updated);
+  });
+
+  // --- Enrollment ---
+
+  app.post('/api/family/enrollment/codes', (_req, res) => {
+    const code = familyEngine.generateEnrollCode('parent-demo');
+    res.status(201).json(code);
+  });
+
+  app.post('/api/family/agent/enroll', (req, res) => {
+    const { code, deviceName, nickname } = req.body || {};
+    if (!code) {
+      res.status(400).json({ error: 'Enrollment code is required.' });
+      return;
+    }
+    const result = familyEngine.enrollDevice(
+      String(code).trim(),
+      String(deviceName || 'Windows PC'),
+      String(nickname || deviceName || 'Child Device')
+    );
+    if ('error' in result) {
+      res.status(400).json({ error: result.error });
+      return;
+    }
+    const token = `fg-tok-${result.id}-${Math.random().toString(36).slice(2, 10)}`;
+    agentAdapter.registerDeviceToken(token, result.id);
+    res.status(201).json({ device: result, deviceToken: token, enrollmentToken: token });
+  });
+
+  // --- Agent check-in ---
+
+  app.post('/api/family/agent/checkin', async (req, res) => {
+    const authHeader = req.headers.authorization ?? '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+
+    if (!token) {
+      res.status(401).json({ error: 'Missing Authorization header.' });
+      return;
+    }
+
+    const deviceId = await agentAdapter.validateToken(token);
+    if (!deviceId) {
+      res.status(401).json({ error: 'Invalid or expired device token.' });
+      return;
+    }
+
+    try {
+      const response = await agentAdapter.processCheckin(deviceId, req.body);
+      res.json(response);
+    } catch (err) {
+      console.error('Agent checkin error:', err);
+      res.status(500).json({ error: 'Internal server error during checkin.' });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // End Family API
+  // -------------------------------------------------------------------------
 
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
